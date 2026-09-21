@@ -97,19 +97,32 @@ async function activateCustomSite(origin) {
   // 容量校验保持同步执行，避免明知无法保存时仍向用户申请站点权限。
   if (!alreadyAdded) sitesApi.assertCustomSitesStorageFits(nextSites);
 
-  // 权限请求必须直接由用户点击触发，因此调用前不执行异步操作。
+  // 必须在请求权限前持久化配置：Chrome 弹出权限确认框时插件弹窗会失焦关闭，
+  // 若保存放在授权之后，弹窗销毁会让后续代码不再执行，导致首次添加要重试一次才生效。
+  // 存储写入与权限请求都在本次点击的同步流程内发起，权限请求仍处于用户手势中；
+  // 授权后即使弹窗已关闭，后台的 permissions.onAdded 监听也会完成脚本注册。
+  let savePromise = Promise.resolve();
+  if (!alreadyAdded) {
+    customSites = nextSites;
+    savePromise = saveCustomSites(nextSites).catch(function (e) {
+      customSites = customSites.filter(function (item) { return item !== origin; });
+      throw e;
+    });
+    // 权限框关闭弹窗后没人再 await，先挂一个处理器避免未处理的 rejection。
+    savePromise.catch(function () {});
+  }
+
+  // 权限请求必须直接由用户点击触发。
   const granted = await chrome.permissions.request({ origins: [pattern] });
   if (!granted) {
-    setSiteStatus('未获得该站点权限，地址没有启用', true);
+    // 保留站点并标记为待授权，用户可稍后点击「授权」重试。
+    await savePromise.catch(function () {});
+    await renderCustomSites();
+    setSiteStatus('未获得该站点权限，可稍后点击「授权」重试', true);
     return;
   }
 
-  if (!alreadyAdded) {
-    await saveCustomSites(nextSites);
-    // 仅在持久化成功后更新内存，避免失败后弹窗显示未保存的站点。
-    customSites = nextSites;
-  }
-
+  await savePromise;
   await syncCustomSiteScripts();
   await renderCustomSites();
   siteInput.value = '';
